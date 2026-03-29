@@ -884,8 +884,8 @@ def create_transaction_rule(
     """
     Create a Monarch Money transaction rule to auto-categorize future transactions.
 
-    Use 'original_statement_contains' to match on the raw bank statement text (e.g. "KP SANTA CLARA").
-    Use 'merchant_name_exactly' to match on the Monarch merchant name (e.g. "Fastrak").
+    Use 'original_statement_contains' to match on the raw bank statement text (e.g. "WHOLEFDS" for Whole Foods).
+    Use 'merchant_name_exactly' to match on the Monarch merchant name (e.g. "whole foods market").
 
     Args:
         original_statement_contains: Match if original bank statement contains this text (case-insensitive)
@@ -1280,8 +1280,8 @@ def merge_merchants(
     Merge one merchant into another, moving all transactions to the target merchant,
     then deleting the source merchant.
 
-    Use this to consolidate duplicate merchants (e.g. "Kaiser Permanente (San Jose)"
-    into "Kaiser Permanente").
+    Use this to consolidate duplicate merchants (e.g. "Starbucks Coffee"
+    into "Starbucks").
 
     Args:
         source_merchant_id: The merchant ID to delete (transactions will be moved away from this)
