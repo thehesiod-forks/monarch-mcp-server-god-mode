@@ -18,8 +18,9 @@ from monarchmoney import MonarchMoney, RequireMFAException
 from monarchmoney.monarchmoney import MonarchMoneyEndpoints
 
 # The library defaults to api.monarchmoney.com which Cloudflare blocks for non-browser clients.
-# api.monarch.com is the correct endpoint used by the web app.
+# api.monarch.com is the correct endpoint used by the Monarch web app.
 MonarchMoneyEndpoints.BASE_URL = "https://api.monarch.com"
+
 from pydantic import BaseModel, Field
 from monarch_mcp_server.secure_session import secure_session
 
@@ -60,16 +61,6 @@ class MonarchConfig(BaseModel):
     )
 
 
-def _apply_browser_headers(client: MonarchMoney) -> None:
-    """Add browser-like headers to avoid Cloudflare bot detection."""
-    client._headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Origin": "https://app.monarch.com",
-        "monarch-client": "monarch-core-web-app-graphql",
-    })
-
 
 async def get_monarch_client() -> MonarchMoney:
     """Get or create MonarchMoney client instance using secure session storage."""
@@ -78,7 +69,6 @@ async def get_monarch_client() -> MonarchMoney:
 
     if client is not None:
         logger.info("✅ Using authenticated client from secure keyring storage")
-        _apply_browser_headers(client)
         return client
 
     # If no secure session, try environment credentials
@@ -88,7 +78,6 @@ async def get_monarch_client() -> MonarchMoney:
     if email and password:
         try:
             client = MonarchMoney()
-            _apply_browser_headers(client)
             await client.login(email, password)
             logger.info(
                 "Successfully logged into Monarch Money with environment credentials"
