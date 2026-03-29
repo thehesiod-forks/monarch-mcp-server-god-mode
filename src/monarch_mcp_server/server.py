@@ -15,6 +15,11 @@ from mcp.server.auth.provider import AccessTokenT
 from mcp.server.fastmcp import FastMCP
 import mcp.types as types
 from monarchmoney import MonarchMoney, RequireMFAException
+from monarchmoney.monarchmoney import MonarchMoneyEndpoints
+
+# The library defaults to api.monarchmoney.com which Cloudflare blocks for non-browser clients.
+# api.monarch.com is the correct endpoint used by the web app.
+MonarchMoneyEndpoints.BASE_URL = "https://api.monarch.com"
 from pydantic import BaseModel, Field
 from monarch_mcp_server.secure_session import secure_session
 
@@ -56,13 +61,7 @@ class MonarchConfig(BaseModel):
 
 
 def _apply_browser_headers(client: MonarchMoney) -> None:
-    """Patch the GraphQL client to use api.monarch.com and browser-like headers.
-
-    The library defaults to api.monarchmoney.com which Cloudflare blocks for non-browser clients.
-    """
-    from gql import Client
-    from gql.transport.aiohttp import AIOHTTPTransport
-
+    """Add browser-like headers to avoid Cloudflare bot detection."""
     client._headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
         "Accept": "*/*",
@@ -70,19 +69,6 @@ def _apply_browser_headers(client: MonarchMoney) -> None:
         "Origin": "https://app.monarch.com",
         "monarch-client": "monarch-core-web-app-graphql",
     })
-
-    original_timeout = client._timeout
-    original_headers = client._headers
-
-    def _patched_get_graphql_client():
-        transport = AIOHTTPTransport(
-            url="https://api.monarch.com/graphql",
-            headers=original_headers,
-            timeout=original_timeout,
-        )
-        return Client(transport=transport, fetch_schema_from_transport=False)
-
-    client._get_graphql_client = _patched_get_graphql_client
 
 
 async def get_monarch_client() -> MonarchMoney:
