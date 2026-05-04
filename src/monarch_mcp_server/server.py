@@ -179,9 +179,14 @@ def get_accounts() -> str:
                 "type": (account.get("type") or {}).get("name"),
                 "balance": account.get("currentBalance"),
                 "institution": (account.get("institution") or {}).get("name"),
+                "mask": account.get("mask"),
                 "is_active": account.get("isActive")
                 if "isActive" in account
                 else not account.get("deactivatedAt"),
+                "closed_at": account.get("deactivatedAt"),
+                "is_hidden": account.get("isHidden"),
+                "hide_from_list": account.get("hideFromList"),
+                "last_synced": account.get("displayLastUpdatedAt"),
             }
             account_list.append(account_info)
 
