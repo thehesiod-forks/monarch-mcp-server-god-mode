@@ -373,6 +373,7 @@ def create_transaction(
     date: str,
     category_id: Optional[str] = None,
     merchant_name: Optional[str] = None,
+    notes: Optional[str] = None,
 ) -> str:
     """
     Create a new transaction in Monarch Money.
@@ -380,28 +381,28 @@ def create_transaction(
     Args:
         account_id: The account ID to add the transaction to
         amount: Transaction amount (positive for income, negative for expenses)
-        description: Transaction description
+        description: Transaction description (used as the merchant name when
+            merchant_name is not provided)
         date: Transaction date in YYYY-MM-DD format
         category_id: Optional category ID
         merchant_name: Optional merchant name
+        notes: Optional notes to attach to the transaction
     """
     try:
 
         async def _create_transaction():
             client = await get_monarch_client()
 
+            # monarchmoney lib expects merchant_name + category_id and has no
+            # `description` field; map description -> merchant_name as a fallback.
             transaction_data = {
+                "date": date,
                 "account_id": account_id,
                 "amount": amount,
-                "description": description,
-                "date": date,
+                "merchant_name": merchant_name or description,
+                "category_id": category_id,
+                "notes": notes or "",
             }
-
-            if category_id:
-                transaction_data["category_id"] = category_id
-            if merchant_name:
-                transaction_data["merchant_name"] = merchant_name
-
             return await client.create_transaction(**transaction_data)
 
         result = run_async(_create_transaction())
