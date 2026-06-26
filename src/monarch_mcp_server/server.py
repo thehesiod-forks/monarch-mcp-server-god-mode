@@ -1835,10 +1835,10 @@ def create_manual_account(
                 "account_name": name,
                 "account_type": account_type,
                 "account_balance": balance,
-                "include_in_net_worth": include_in_net_worth,
+                # monarchmoney lib expects is_in_net_worth / account_sub_type (required)
+                "is_in_net_worth": include_in_net_worth,
+                "account_sub_type": account_subtype,
             }
-            if account_subtype:
-                kwargs["account_subtype"] = account_subtype
             return await client.create_manual_account(**kwargs)
 
         result = run_async(_create_manual_account())
