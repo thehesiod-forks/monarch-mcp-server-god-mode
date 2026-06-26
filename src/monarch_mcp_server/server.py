@@ -509,14 +509,18 @@ def get_account_history(
 
         async def _get_account_history():
             client = await get_monarch_client()
-            kwargs = {}
-            if start_date:
-                kwargs["start_date"] = start_date
-            if end_date:
-                kwargs["end_date"] = end_date
-            return await client.get_account_history(account_id, **kwargs)
+            # lib's get_account_history takes only account_id (no date params)
+            return await client.get_account_history(account_id)
 
         result = run_async(_get_account_history())
+
+        # Date filtering isn't supported by the lib, so filter the snapshots here.
+        if (start_date or end_date) and isinstance(result, list):
+            result = [
+                r for r in result
+                if (not start_date or str(r.get("date", "")) >= start_date)
+                and (not end_date or str(r.get("date", "")) <= end_date)
+            ]
 
         return json.dumps(result, indent=2, default=str)
     except Exception as e:
