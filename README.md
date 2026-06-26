@@ -63,16 +63,20 @@ My MonarchMoney referral: https://www.monarchmoney.com/referral/ufmn0r83yf?r_sou
 
 **Important**: For security and MFA support, authentication is done outside of Claude Desktop.
 
-Open Terminal and run:
+Monarch moved its API to `api.monarch.com` and now requires a GraphQL login with TOTP
+MFA, which the pinned `monarchmoney` 0.1.15 cannot do. `login_setup.py` uses
+`monarchmoney-enhanced` for login only (the server stays on 0.1.15 for data calls), so
+run it via `uvx` so nothing is installed into the server's environment:
+
 ```bash
 cd /path/to/your/monarch-mcp-server
-python login_setup.py
+uvx --with monarchmoney-enhanced --with keyring python login_setup.py
 ```
 
 Follow the prompts:
 - Enter your Monarch Money email and password
-- Provide 2FA code if you have MFA enabled
-- Session will be saved automatically
+- Provide the current 6-digit code from your authenticator app if you have MFA enabled
+- The session token is saved to the system keyring automatically
 
 ### 3. Start Using in Claude Desktop
 
@@ -306,7 +310,7 @@ Which of my bank connections are working? When did they last sync?
 
 ### Authentication Issues
 If you see "Authentication needed" errors:
-1. Run the setup command: `cd /path/to/your/monarch-mcp-server && python login_setup.py`
+1. Run the setup command: `cd /path/to/your/monarch-mcp-server && uvx --with monarchmoney-enhanced --with keyring python login_setup.py`
 2. Restart Claude Desktop
 3. Try using a tool like `get_accounts`
 
@@ -382,7 +386,7 @@ MIT License
 
 For issues:
 1. Check authentication with `check_auth_status`
-2. Run the setup command again: `cd /path/to/your/monarch-mcp-server && python login_setup.py`
+2. Run the setup command again: `cd /path/to/your/monarch-mcp-server && uvx --with monarchmoney-enhanced --with keyring python login_setup.py`
 3. Check error logs for detailed messages
 4. Ensure Monarch Money service is accessible
 5. Open an issue on GitHub with error details
@@ -394,4 +398,4 @@ For issues:
 To update the server:
 1. Pull latest changes from repository
 2. Restart Claude Desktop
-3. Re-run authentication if needed: `python login_setup.py`
+3. Re-run authentication if needed: `uvx --with monarchmoney-enhanced --with keyring python login_setup.py`
