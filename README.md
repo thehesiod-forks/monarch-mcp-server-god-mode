@@ -63,20 +63,24 @@ My MonarchMoney referral: https://www.monarchmoney.com/referral/ufmn0r83yf?r_sou
 
 **Important**: For security and MFA support, authentication is done outside of Claude Desktop.
 
-Open Terminal and run:
+Monarch moved its API to `api.monarch.com` and now requires a GraphQL login with TOTP
+MFA, which the pinned `monarchmoney` 0.1.15 cannot do. `login_setup.py` uses
+`monarchmoney-enhanced` for login only (the server stays on 0.1.15 for data calls), so
+run it via `uvx` so nothing is installed into the server's environment:
+
 ```bash
 cd /path/to/your/monarch-mcp-server
-python login_setup.py
+uvx --with monarchmoney-enhanced --with keyring python login_setup.py
 ```
 
 Follow the prompts:
 - Enter your Monarch Money email and password
-- Provide 2FA code if you have MFA enabled
-- Session will be saved automatically
+- Provide the current 6-digit code from your authenticator app if you have MFA enabled
+- The session token is saved to the system keyring automatically
 
 ### 3. Start Using in Claude Desktop
 
-Once authenticated, you have access to 31 powerful tools for managing your finances.
+Once authenticated, you have access to 39 powerful tools for managing your finances.
 
 ---
 
@@ -105,9 +109,19 @@ Once authenticated, you have access to 31 powerful tools for managing your finan
 - **Get Categories**: List all transaction categories
 - **Get Category Groups**: View category hierarchy and groupings
 - **Create Category**: Add custom categories for transaction organization
+- **Create Category Group**: Add a new parent group (e.g. "Subscriptions")
+- **Delete Category Group**: Remove a group with optional category migration
 - **Get Tags**: List all user-defined tags
 - **Create Tag**: Add new tags for transaction labeling
 - **Set Transaction Tags**: Apply tags to transactions
+
+### Rules & Merchant Management
+- **Create Transaction Rule**: Auto-categorize future transactions by raw bank statement text or merchant name
+- **Get Transaction Rules**: List all configured rules with their criteria and actions
+- **Update Transaction Rule**: Modify an existing rule's criteria or category in-place
+- **Delete Transaction Rule**: Remove a rule without affecting existing transactions
+- **Update Merchant**: Rename a merchant globally across all past and future transactions
+- **Merge Merchants**: Consolidate duplicate merchants by moving all transactions to a target
 
 ### Budgets & Cashflow
 - **Get Budgets**: Access budget information with spent/remaining amounts
@@ -162,7 +176,7 @@ Once authenticated, you have access to 31 powerful tools for managing your finan
 | `get_transactions_summary` | Get aggregated summary | `start_date`?, `end_date`? |
 | `get_recurring_transactions` | Get recurring/scheduled transactions | None |
 | `create_transaction` | Create new transaction | `account_id`, `amount`, `description`, `date`, `category_id`?, `merchant_name`? |
-| `update_transaction` | Update existing transaction | `transaction_id`, `amount`?, `description`?, `category_id`?, `date`? |
+| `update_transaction` | Update existing transaction | `transaction_id`, `amount`?, `category_id`?, `date`?, `merchant_name`?, `notes`?, `hide_from_reports`?, `needs_review`? |
 | `update_transaction_splits` | Split transaction across categories | `transaction_id`, `splits` (JSON array) |
 
 ### Categories & Tags
@@ -171,10 +185,23 @@ Once authenticated, you have access to 31 powerful tools for managing your finan
 |------|-------------|------------|
 | `get_transaction_categories` | Get all categories | None |
 | `get_transaction_category_groups` | Get category groups | None |
-| `create_transaction_category` | Create custom category | `name`, `group_id`?, `icon`? |
+| `create_transaction_category` | Create custom category | `name`, `group_id`, `icon`? |
+| `create_category_group` | Create new category group | `name`, `group_type`?, `group_level_budgeting`? |
+| `delete_category_group` | Delete a category group | `group_id`, `move_to_group_id`? |
 | `get_transaction_tags` | Get all tags | None |
 | `create_transaction_tag` | Create new tag | `name`, `color`? |
 | `set_transaction_tags` | Apply tags to transaction | `transaction_id`, `tag_ids` (JSON array) |
+
+### Rules & Merchant Management
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `create_transaction_rule` | Create auto-categorization rule | `original_statement_contains`?, `merchant_name_exactly`?, `set_category_id`?, `set_merchant_name`?, `hide_from_reports`?, `apply_to_existing`? |
+| `get_transaction_rules` | List all rules with criteria and actions | None |
+| `update_transaction_rule` | Update an existing rule in-place | `rule_id`, `original_statement_contains`?, `merchant_name_exactly`?, `set_category_id`?, `set_hide_from_reports`?, `apply_to_existing`? |
+| `delete_transaction_rule` | Delete a rule by ID | `rule_id` |
+| `update_merchant` | Rename a merchant globally | `merchant_id`, `name` |
+| `merge_merchants` | Merge duplicate merchant into another | `source_merchant_id`, `target_merchant_id` |
 
 ### Budgets & Cashflow
 
@@ -229,6 +256,26 @@ Split my $150 Costco transaction: $100 for groceries and $50 for household items
 Create a new category called "Side Hustle Income" for tracking my freelance earnings
 ```
 
+### Auto-Categorize by Bank Statement
+```
+Create a rule: whenever the bank statement contains "WHOLEFDS", categorize as Groceries
+```
+
+### Fix a Mis-Named Merchant
+```
+Rename the merchant "Sq Bluebottlecoffee" to "Blue Bottle Coffee" and categorize as Coffee Shops
+```
+
+### Consolidate Duplicate Merchants
+```
+I have "Starbucks" and "Starbucks Coffee" as separate merchants — merge them into one
+```
+
+### Update a Miscategorized Rule
+```
+The rule for "paypal *netflix" is pointing to the wrong category — update it to Entertainment
+```
+
 ### Tag Transactions
 ```
 Tag my recent business dinner as "Tax Deductible" and "Client Entertainment"
@@ -263,7 +310,7 @@ Which of my bank connections are working? When did they last sync?
 
 ### Authentication Issues
 If you see "Authentication needed" errors:
-1. Run the setup command: `cd /path/to/your/monarch-mcp-server && python login_setup.py`
+1. Run the setup command: `cd /path/to/your/monarch-mcp-server && uvx --with monarchmoney-enhanced --with keyring python login_setup.py`
 2. Restart Claude Desktop
 3. Try using a tool like `get_accounts`
 
@@ -293,7 +340,7 @@ Sessions last for weeks, but if expired:
 monarch-mcp-server/
 ├── src/monarch_mcp_server/
 │   ├── __init__.py
-│   ├── server.py              # Main server implementation (31 tools)
+│   ├── server.py              # Main server implementation (39 tools)
 │   └── secure_session.py      # Secure session management
 ├── login_setup.py             # Authentication setup script
 ├── pyproject.toml             # Project configuration
@@ -339,7 +386,7 @@ MIT License
 
 For issues:
 1. Check authentication with `check_auth_status`
-2. Run the setup command again: `cd /path/to/your/monarch-mcp-server && python login_setup.py`
+2. Run the setup command again: `cd /path/to/your/monarch-mcp-server && uvx --with monarchmoney-enhanced --with keyring python login_setup.py`
 3. Check error logs for detailed messages
 4. Ensure Monarch Money service is accessible
 5. Open an issue on GitHub with error details
@@ -351,4 +398,4 @@ For issues:
 To update the server:
 1. Pull latest changes from repository
 2. Restart Claude Desktop
-3. Re-run authentication if needed: `python login_setup.py`
+3. Re-run authentication if needed: `uvx --with monarchmoney-enhanced --with keyring python login_setup.py`

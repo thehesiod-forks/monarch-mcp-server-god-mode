@@ -1,6 +1,7 @@
 """Monarch Money MCP Server - Main server implementation."""
 
 import os
+import sys
 import logging
 import asyncio
 from typing import Any, Dict, List, Optional, Union
@@ -11,21 +12,27 @@ from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
 from mcp.server.auth.provider import AccessTokenT
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 import mcp.types as types
 from monarchmoney import MonarchMoney, RequireMFAException
+from monarchmoney.monarchmoney import MonarchMoneyEndpoints
+
+# The library defaults to api.monarchmoney.com which Cloudflare blocks for non-browser clients.
+# api.monarch.com is the correct endpoint used by the Monarch web app.
+MonarchMoneyEndpoints.BASE_URL = "https://api.monarch.com"
+
 from pydantic import BaseModel, Field
 from monarch_mcp_server.secure_session import secure_session
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging - must use stderr to avoid corrupting MCP stdio transport on stdout
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
 
-# Initialize FastMCP server
-mcp = FastMCP("Monarch Money MCP Server")
+# Initialize MCPServer
+mcp = MCPServer("Monarch Money MCP Server")
 
 
 def run_async(coro):
@@ -52,6 +59,7 @@ class MonarchConfig(BaseModel):
     session_file: str = Field(
         default="monarch_session.json", description="Session file path"
     )
+
 
 
 async def get_monarch_client() -> MonarchMoney:
@@ -171,9 +179,14 @@ def get_accounts() -> str:
                 "type": (account.get("type") or {}).get("name"),
                 "balance": account.get("currentBalance"),
                 "institution": (account.get("institution") or {}).get("name"),
+                "mask": account.get("mask"),
                 "is_active": account.get("isActive")
                 if "isActive" in account
                 else not account.get("deactivatedAt"),
+                "closed_at": account.get("deactivatedAt"),
+                "is_hidden": account.get("isHidden"),
+                "hide_from_list": account.get("hideFromList"),
+                "last_synced": account.get("displayLastUpdatedAt"),
             }
             account_list.append(account_info)
 
@@ -189,7 +202,13 @@ def get_transactions(
     offset: int = 0,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    account_id: Optional[str] = None,
+    search: Optional[str] = None,
+    account_ids: Optional[List[str]] = None,
+    category_ids: Optional[List[str]] = None,
+    tag_ids: Optional[List[str]] = None,
+    has_notes: Optional[bool] = None,
+    is_recurring: Optional[bool] = None,
+    hidden_from_reports: Optional[bool] = None,
 ) -> str:
     """
     Get transactions from Monarch Money.
@@ -199,23 +218,40 @@ def get_transactions(
         offset: Number of transactions to skip (default: 0)
         start_date: Start date in YYYY-MM-DD format
         end_date: End date in YYYY-MM-DD format
-        account_id: Specific account ID to filter by
+        search: Search string to filter transactions by merchant name, description, etc.
+        account_ids: List of account IDs to filter by
+        category_ids: List of category IDs to filter by
+        tag_ids: List of tag IDs to filter by
+        has_notes: Filter for transactions with/without notes
+        is_recurring: Filter for recurring transactions
+        hidden_from_reports: Filter for transactions hidden from reports
     """
     try:
 
         async def _get_transactions():
             client = await get_monarch_client()
 
-            # Build filters
-            filters = {}
+            kwargs: dict = {}
             if start_date:
-                filters["start_date"] = start_date
+                kwargs["start_date"] = start_date
             if end_date:
-                filters["end_date"] = end_date
-            if account_id:
-                filters["account_id"] = account_id
+                kwargs["end_date"] = end_date
+            if search:
+                kwargs["search"] = search
+            if account_ids:
+                kwargs["account_ids"] = account_ids
+            if category_ids:
+                kwargs["category_ids"] = category_ids
+            if tag_ids:
+                kwargs["tag_ids"] = tag_ids
+            if has_notes is not None:
+                kwargs["has_notes"] = has_notes
+            if is_recurring is not None:
+                kwargs["is_recurring"] = is_recurring
+            if hidden_from_reports is not None:
+                kwargs["hidden_from_reports"] = hidden_from_reports
 
-            return await client.get_transactions(limit=limit, offset=offset, **filters)
+            return await client.get_transactions(limit=limit, offset=offset, **kwargs)
 
         transactions = run_async(_get_transactions())
 
@@ -337,6 +373,7 @@ def create_transaction(
     date: str,
     category_id: Optional[str] = None,
     merchant_name: Optional[str] = None,
+    notes: Optional[str] = None,
 ) -> str:
     """
     Create a new transaction in Monarch Money.
@@ -344,28 +381,28 @@ def create_transaction(
     Args:
         account_id: The account ID to add the transaction to
         amount: Transaction amount (positive for income, negative for expenses)
-        description: Transaction description
+        description: Transaction description (used as the merchant name when
+            merchant_name is not provided)
         date: Transaction date in YYYY-MM-DD format
         category_id: Optional category ID
         merchant_name: Optional merchant name
+        notes: Optional notes to attach to the transaction
     """
     try:
 
         async def _create_transaction():
             client = await get_monarch_client()
 
+            # monarchmoney lib expects merchant_name + category_id and has no
+            # `description` field; map description -> merchant_name as a fallback.
             transaction_data = {
+                "date": date,
                 "account_id": account_id,
                 "amount": amount,
-                "description": description,
-                "date": date,
+                "merchant_name": merchant_name or description,
+                "category_id": category_id,
+                "notes": notes or "",
             }
-
-            if category_id:
-                transaction_data["category_id"] = category_id
-            if merchant_name:
-                transaction_data["merchant_name"] = merchant_name
-
             return await client.create_transaction(**transaction_data)
 
         result = run_async(_create_transaction())
@@ -380,9 +417,12 @@ def create_transaction(
 def update_transaction(
     transaction_id: str,
     amount: Optional[float] = None,
-    description: Optional[str] = None,
     category_id: Optional[str] = None,
+    merchant_name: Optional[str] = None,
+    notes: Optional[str] = None,
     date: Optional[str] = None,
+    hide_from_reports: Optional[bool] = None,
+    needs_review: Optional[bool] = None,
 ) -> str:
     """
     Update an existing transaction in Monarch Money.
@@ -390,9 +430,12 @@ def update_transaction(
     Args:
         transaction_id: The ID of the transaction to update
         amount: New transaction amount
-        description: New transaction description
         category_id: New category ID
+        merchant_name: New merchant name
+        notes: Notes to attach to the transaction
         date: New transaction date in YYYY-MM-DD format
+        hide_from_reports: Whether to hide from reports
+        needs_review: Whether the transaction needs review
     """
     try:
 
@@ -403,12 +446,18 @@ def update_transaction(
 
             if amount is not None:
                 update_data["amount"] = amount
-            if description is not None:
-                update_data["description"] = description
             if category_id is not None:
                 update_data["category_id"] = category_id
+            if merchant_name is not None:
+                update_data["merchant_name"] = merchant_name
+            if notes is not None:
+                update_data["notes"] = notes
             if date is not None:
                 update_data["date"] = date
+            if hide_from_reports is not None:
+                update_data["hide_from_reports"] = hide_from_reports
+            if needs_review is not None:
+                update_data["needs_review"] = needs_review
 
             return await client.update_transaction(**update_data)
 
@@ -460,14 +509,18 @@ def get_account_history(
 
         async def _get_account_history():
             client = await get_monarch_client()
-            kwargs = {}
-            if start_date:
-                kwargs["start_date"] = start_date
-            if end_date:
-                kwargs["end_date"] = end_date
-            return await client.get_account_history(account_id, **kwargs)
+            # lib's get_account_history takes only account_id (no date params)
+            return await client.get_account_history(account_id)
 
         result = run_async(_get_account_history())
+
+        # Date filtering isn't supported by the lib, so filter the snapshots here.
+        if (start_date or end_date) and isinstance(result, list):
+            result = [
+                r for r in result
+                if (not start_date or str(r.get("date", "")) >= start_date)
+                and (not end_date or str(r.get("date", "")) <= end_date)
+            ]
 
         return json.dumps(result, indent=2, default=str)
     except Exception as e:
@@ -735,6 +788,278 @@ def get_transaction_category_groups() -> str:
 
 
 @mcp.tool()
+def create_category_group(
+    name: str,
+    group_type: str = "expense",
+    group_level_budgeting: bool = False,
+) -> str:
+    """
+    Create a new category group (parent grouping for categories).
+
+    Args:
+        name: Group name (e.g. "Subscriptions")
+        group_type: "expense", "income", or "transfer"
+        group_level_budgeting: If true, budget is set at the group level instead of per-category
+    """
+    try:
+
+        async def _create_category_group():
+            client = await get_monarch_client()
+            from gql import gql as gql_parse
+
+            query = gql_parse("""
+                mutation Common_CreateCategoryGroup($input: CreateCategoryGroupInput!) {
+                    createCategoryGroup(input: $input) {
+                        categoryGroup {
+                            id
+                            name
+                            order
+                            type
+                            color
+                            groupLevelBudgetingEnabled
+                            budgetVariability
+                            rolloverPeriod {
+                                id
+                                startMonth
+                                endMonth
+                                startingBalance
+                                __typename
+                            }
+                            __typename
+                        }
+                        __typename
+                    }
+                }
+            """)
+
+            from datetime import datetime
+            variables = {
+                "input": {
+                    "name": name,
+                    "type": group_type,
+                    "groupLevelBudgetingEnabled": group_level_budgeting,
+                    "rolloverEnabled": False,
+                    "rolloverStartMonth": datetime.today().replace(day=1).strftime("%Y-%m-%d"),
+                    "rolloverType": "monthly",
+                }
+            }
+
+            return await client.gql_call(
+                operation="Common_CreateCategoryGroup",
+                graphql_query=query,
+                variables=variables,
+            )
+
+        result = run_async(_create_category_group())
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to create category group: {e}")
+        return f"Error creating category group: {str(e)}"
+
+
+@mcp.tool()
+def delete_category_group(
+    group_id: str,
+    move_to_group_id: Optional[str] = None,
+) -> str:
+    """
+    Delete a category group. Optionally move its categories to another group.
+
+    Args:
+        group_id: The ID of the group to delete
+        move_to_group_id: If provided, move categories from the deleted group to this group.
+                          If not provided, categories in the group will be moved to "Other".
+    """
+    try:
+
+        async def _delete_category_group():
+            client = await get_monarch_client()
+            from gql import gql as gql_parse
+
+            query = gql_parse("""
+                mutation Common_DeleteCategoryGroup($id: UUID!, $moveToGroupId: UUID) {
+                    deleteCategoryGroup(id: $id, moveToGroupId: $moveToGroupId) {
+                        deleted
+                        errors {
+                            fieldErrors {
+                                field
+                                messages
+                                __typename
+                            }
+                            message
+                            code
+                            __typename
+                        }
+                        __typename
+                    }
+                }
+            """)
+
+            variables = {"id": group_id}
+            if move_to_group_id:
+                variables["moveToGroupId"] = move_to_group_id
+
+            return await client.gql_call(
+                operation="Common_DeleteCategoryGroup",
+                graphql_query=query,
+                variables=variables,
+            )
+
+        result = run_async(_delete_category_group())
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to delete category group: {e}")
+        return f"Error deleting category group: {str(e)}"
+
+
+@mcp.tool()
+def create_transaction_rule(
+    original_statement_contains: Optional[str] = None,
+    merchant_name_exactly: Optional[str] = None,
+    amount_min: Optional[float] = None,
+    amount_max: Optional[float] = None,
+    is_expense: bool = True,
+    account_ids: Optional[List[str]] = None,
+    set_category_id: Optional[str] = None,
+    set_merchant_name: Optional[str] = None,
+    hide_from_reports: Optional[bool] = None,
+    add_tag_ids: Optional[List[str]] = None,
+    set_review_status: Optional[str] = None,
+    apply_to_existing: bool = True,
+) -> str:
+    """
+    Create a Monarch Money transaction rule to auto-categorize future transactions.
+
+    Use 'original_statement_contains' to match on the raw bank statement text (e.g. "WHOLEFDS" for Whole Foods).
+    Use 'merchant_name_exactly' to match on the Monarch merchant name (e.g. "whole foods market").
+
+    Args:
+        original_statement_contains: Match if original bank statement contains this text (case-insensitive)
+        merchant_name_exactly: Match if Monarch merchant name exactly equals this text
+        amount_min: Minimum transaction amount (debit/expense by default). If only amount_min: "greater than". If both amount_min and amount_max: "between".
+        amount_max: Maximum transaction amount. If only amount_max: "less than".
+        is_expense: Whether amount criteria applies to expenses/debits (default True) or credits (False)
+        account_ids: List of account IDs to restrict rule to specific accounts
+        set_category_id: Category ID to assign to matched transactions
+        set_merchant_name: Rename the merchant to this name (must be an existing Monarch merchant name)
+        hide_from_reports: Whether to hide matched transactions from reports
+        add_tag_ids: List of tag IDs to add to matched transactions (e.g. ["181126664071419049"] for Tax tag)
+        set_review_status: Set review status: "needs_review" or "reviewed"
+        apply_to_existing: Whether to apply the rule to existing transactions (default True)
+    """
+    try:
+        assert original_statement_contains or merchant_name_exactly, \
+            "Must provide either original_statement_contains or merchant_name_exactly"
+        assert set_category_id or set_merchant_name or hide_from_reports is not None or add_tag_ids or set_review_status, \
+            "Must provide at least one action"
+
+        async def _create_rule():
+            client = await get_monarch_client()
+            from gql import gql as gql_parse
+
+            query = gql_parse("""
+                mutation Common_CreateTransactionRuleMutationV2($input: CreateTransactionRuleInput!) {
+                    createTransactionRuleV2(input: $input) {
+                        errors {
+                            fieldErrors {
+                                field
+                                messages
+                                __typename
+                            }
+                            message
+                            code
+                            __typename
+                        }
+                        __typename
+                    }
+                }
+            """)
+
+            input_data: dict = {
+                "merchantCriteriaUseOriginalStatement": False,
+                "applyToExistingTransactions": apply_to_existing,
+                "actionSetBusinessEntityIsUnassigned": False,
+                "categoryIds": None,
+                "accountIds": account_ids or None,
+                "merchantCriteria": None,
+                "merchantNameCriteria": None,
+                "amountCriteria": None,
+                "addTagsAction": None,
+                "splitTransactionsAction": None,
+                "linkGoalAction": None,
+                "linkSavingsGoalAction": None,
+                "reviewStatusAction": set_review_status,
+                "actionSetBusinessEntity": None,
+            }
+
+            if original_statement_contains:
+                input_data["originalStatementCriteria"] = [
+                    {"operator": "contains", "value": original_statement_contains}
+                ]
+            else:
+                input_data["originalStatementCriteria"] = None
+
+            if merchant_name_exactly:
+                input_data["merchantCriteria"] = [
+                    {"operator": "eq", "value": merchant_name_exactly.lower()}
+                ]
+
+            if amount_min is not None or amount_max is not None:
+                if amount_min is not None and amount_max is not None:
+                    input_data["amountCriteria"] = {
+                        "operator": "between",
+                        "isExpense": is_expense,
+                        "value": None,
+                        "valueRange": {"lower": amount_min, "upper": amount_max},
+                    }
+                elif amount_min is not None:
+                    input_data["amountCriteria"] = {
+                        "operator": "gt",
+                        "isExpense": is_expense,
+                        "value": amount_min,
+                        "valueRange": None,
+                    }
+                else:
+                    input_data["amountCriteria"] = {
+                        "operator": "lt",
+                        "isExpense": is_expense,
+                        "value": amount_max,
+                        "valueRange": None,
+                    }
+
+            if set_category_id:
+                input_data["setCategoryAction"] = set_category_id
+            else:
+                input_data["setCategoryAction"] = None
+
+            if set_merchant_name:
+                input_data["setMerchantAction"] = set_merchant_name
+            else:
+                input_data["setMerchantAction"] = None
+
+            if hide_from_reports is not None:
+                input_data["setHideFromReportsAction"] = hide_from_reports
+
+            if add_tag_ids:
+                input_data["addTagsAction"] = add_tag_ids
+
+            return await client.gql_call(
+                operation="Common_CreateTransactionRuleMutationV2",
+                graphql_query=query,
+                variables={"input": input_data},
+            )
+
+        result = run_async(_create_rule())
+        errors = result.get("createTransactionRuleV2", {}).get("errors")
+        if errors:
+            return f"Error creating rule: {errors}"
+        return "Rule created successfully"
+    except Exception as e:
+        logger.error(f"Failed to create transaction rule: {e}")
+        return f"Error creating transaction rule: {str(e)}"
+
+
+@mcp.tool()
 def create_transaction_category(
     name: str,
     group_id: Optional[str] = None,
@@ -752,9 +1077,12 @@ def create_transaction_category(
 
         async def _create_transaction_category():
             client = await get_monarch_client()
-            kwargs = {"name": name}
-            if group_id:
-                kwargs["group_id"] = group_id
+            if not group_id:
+                raise ValueError("group_id is required to create a transaction category")
+            kwargs = {
+                "group_id": group_id,
+                "transaction_category_name": name,
+            }
             if icon:
                 kwargs["icon"] = icon
             return await client.create_transaction_category(**kwargs)
@@ -765,6 +1093,473 @@ def create_transaction_category(
     except Exception as e:
         logger.error(f"Failed to create transaction category: {e}")
         return f"Error creating transaction category: {str(e)}"
+
+
+@mcp.tool()
+def update_transaction_category(
+    category_id: str,
+    name: Optional[str] = None,
+    icon: Optional[str] = None,
+) -> str:
+    """
+    Update an existing transaction category's name or icon.
+
+    Args:
+        category_id: The category ID to update (from get_transaction_categories)
+        name: New category name (optional)
+        icon: New emoji icon (optional, e.g. "🏛️" or "💰")
+    """
+    try:
+        async def _update_category():
+            client = await get_monarch_client()
+            from gql import gql as gql_parse
+
+            mutation = gql_parse("""
+                mutation Web_UpdateCategory($input: UpdateCategoryInput!) {
+                    updateCategory(input: $input) {
+                        errors {
+                            fieldErrors { field messages __typename }
+                            message
+                            code
+                            __typename
+                        }
+                        category {
+                            id
+                            name
+                            icon
+                            __typename
+                        }
+                        __typename
+                    }
+                }
+            """)
+            input_data: dict = {"id": category_id}
+            if name is not None:
+                input_data["name"] = name
+            if icon is not None:
+                input_data["icon"] = icon
+            return await client.gql_call(
+                operation="Web_UpdateCategory",
+                graphql_query=mutation,
+                variables={"input": input_data},
+            )
+
+        result = run_async(_update_category())
+        errors = result.get("updateCategory", {}).get("errors")
+        if errors:
+            return f"Error updating category: {errors}"
+        cat = result.get("updateCategory", {}).get("category", {})
+        return f"Category updated: {cat.get('icon', '')} {cat.get('name', '')} (id: {cat.get('id', '')})"
+    except Exception as e:
+        logger.error(f"Failed to update transaction category: {e}")
+        return f"Error updating transaction category: {str(e)}"
+
+
+@mcp.tool()
+def get_transaction_rules() -> str:
+    """
+    Get all transaction rules configured in the account.
+    Returns rules with their conditions (original statement / merchant name) and actions (category, rename, hide).
+    """
+    try:
+        async def _get_rules():
+            client = await get_monarch_client()
+            from gql import gql as gql_parse
+
+            query = gql_parse("""
+                query GetTransactionRules {
+                    transactionRules {
+                        id
+                        order
+                        merchantCriteriaUseOriginalStatement
+                        merchantCriteria { operator value __typename }
+                        merchantNameCriteria { operator value __typename }
+                        originalStatementCriteria { operator value __typename }
+                        setCategoryAction { id name icon __typename }
+                        setMerchantAction { id name __typename }
+                        setHideFromReportsAction
+                        recentApplicationCount
+                        lastAppliedAt
+                        __typename
+                    }
+                }
+            """)
+            return await client.gql_call(
+                operation="GetTransactionRules",
+                graphql_query=query,
+                variables={},
+            )
+
+        result = run_async(_get_rules())
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to get transaction rules: {e}")
+        return f"Error getting transaction rules: {str(e)}"
+
+
+@mcp.tool()
+def delete_transaction_rule(rule_id: str) -> str:
+    """
+    Delete a Monarch Money transaction rule by ID.
+
+    The rule ID can be obtained from get_transaction_rules.
+    Deleting a rule does NOT affect existing transactions — only future auto-categorization.
+
+    Args:
+        rule_id: The rule ID to delete (from get_transaction_rules)
+    """
+    try:
+        async def _delete_rule():
+            client = await get_monarch_client()
+            from gql import gql as gql_parse
+
+            mutation = gql_parse("""
+                mutation Common_DeleteTransactionRule($id: ID!) {
+                    deleteTransactionRule(id: $id) {
+                        deleted
+                        errors {
+                            fieldErrors {
+                                field
+                                messages
+                                __typename
+                            }
+                            message
+                            code
+                            __typename
+                        }
+                        __typename
+                    }
+                }
+            """)
+            return await client.gql_call(
+                operation="Common_DeleteTransactionRule",
+                graphql_query=mutation,
+                variables={"id": rule_id},
+            )
+
+        result = run_async(_delete_rule())
+        payload = result.get("deleteTransactionRule", {})
+        errors = payload.get("errors")
+        if errors:
+            return f"Error deleting rule: {errors}"
+        return f"Rule {rule_id} deleted successfully"
+    except Exception as e:
+        logger.error(f"Failed to delete transaction rule: {e}")
+        return f"Error deleting transaction rule: {str(e)}"
+
+
+@mcp.tool()
+def update_transaction_rule(
+    rule_id: str,
+    original_statement_contains: Optional[str] = None,
+    merchant_name_exactly: Optional[str] = None,
+    amount_min: Optional[float] = None,
+    amount_max: Optional[float] = None,
+    is_expense: bool = True,
+    account_ids: Optional[List[str]] = None,
+    set_category_id: Optional[str] = None,
+    set_hide_from_reports: Optional[bool] = None,
+    add_tag_ids: Optional[List[str]] = None,
+    set_review_status: Optional[str] = None,
+    apply_to_existing: bool = True,
+) -> str:
+    """
+    Update an existing Monarch Money transaction rule.
+
+    Pass only the fields you want to change. The rule ID comes from get_transaction_rules.
+    To switch a rule from merchant-name matching to statement matching (or vice versa),
+    pass the new criterion and leave the old one as None.
+
+    Args:
+        rule_id: The rule ID to update (from get_transaction_rules)
+        original_statement_contains: Match on raw bank statement text (replaces existing criteria if set)
+        merchant_name_exactly: Match on Monarch merchant name exactly (replaces existing criteria if set)
+        amount_min: Minimum amount. amount_min only = "greater than"; both = "between"
+        amount_max: Maximum amount. amount_max only = "less than"
+        is_expense: Whether amount is expense/debit (default True)
+        account_ids: Restrict rule to specific account IDs
+        set_category_id: Category ID to assign to matched transactions
+        set_hide_from_reports: Whether to hide matched transactions from reports
+        add_tag_ids: List of tag IDs to add to matched transactions
+        set_review_status: Set review status: "needs_review" or "reviewed"
+        apply_to_existing: Apply the updated rule to existing transactions (default True)
+    """
+    try:
+        async def _update_rule():
+            client = await get_monarch_client()
+            from gql import gql as gql_parse
+
+            # Fetch existing rule to use as defaults for fields not being updated
+            fetch_query = gql_parse("""
+                query GetTransactionRules {
+                    transactionRules {
+                        id
+                        merchantCriteriaUseOriginalStatement
+                        merchantCriteria { operator value }
+                        merchantNameCriteria { operator value }
+                        originalStatementCriteria { operator value }
+                        setCategoryAction { id }
+                        setMerchantAction { id }
+                        setHideFromReportsAction
+                    }
+                }
+            """)
+            fetch_result = await client.gql_call(
+                operation="GetTransactionRules",
+                graphql_query=fetch_query,
+                variables={},
+            )
+            existing = next(
+                (r for r in fetch_result.get("transactionRules", []) if r["id"] == rule_id),
+                None,
+            )
+            if existing is None:
+                raise ValueError(f"Rule {rule_id} not found")
+
+            mutation = gql_parse("""
+                mutation Common_UpdateTransactionRuleMutationV2($input: UpdateTransactionRuleInput!) {
+                    updateTransactionRuleV2(input: $input) {
+                        errors {
+                            fieldErrors {
+                                field
+                                messages
+                                __typename
+                            }
+                            message
+                            code
+                            __typename
+                        }
+                        __typename
+                    }
+                }
+            """)
+
+            # Determine criteria: caller overrides take precedence, otherwise preserve existing
+            if original_statement_contains is not None:
+                use_original_statement = True
+                orig_criteria = [{"operator": "contains", "value": original_statement_contains.lower()}]
+                name_criteria = None
+                merch_criteria = None
+            elif merchant_name_exactly is not None:
+                use_original_statement = False
+                orig_criteria = None
+                name_criteria = [{"operator": "eq", "value": merchant_name_exactly.lower()}]
+                merch_criteria = None
+            else:
+                # Preserve existing criteria
+                use_original_statement = existing.get("merchantCriteriaUseOriginalStatement", False)
+                orig_criteria = [{"operator": c["operator"], "value": c["value"]}
+                                  for c in (existing.get("originalStatementCriteria") or [])] or None
+                name_criteria = [{"operator": c["operator"], "value": c["value"]}
+                                  for c in (existing.get("merchantNameCriteria") or [])] or None
+                merch_criteria = [{"operator": c["operator"], "value": c["value"]}
+                                   for c in (existing.get("merchantCriteria") or [])] or None
+
+            input_data: dict = {
+                "id": rule_id,
+                "merchantCriteriaUseOriginalStatement": use_original_statement,
+                "merchantCriteria": merch_criteria,
+                "merchantNameCriteria": name_criteria,
+                "originalStatementCriteria": orig_criteria,
+                "amountCriteria": None,
+                "categoryIds": None,
+                "accountIds": account_ids or None,
+                "criteriaBusinessEntityIds": None,
+                "criteriaBusinessEntityIsUnassigned": False,
+                "setMerchantAction": existing.get("setMerchantAction", {}).get("id") if existing.get("setMerchantAction") else None,
+                "setCategoryAction": set_category_id if set_category_id is not None else (existing.get("setCategoryAction") or {}).get("id"),
+                "addTagsAction": add_tag_ids if add_tag_ids is not None else None,
+                "linkGoalAction": None,
+                "linkSavingsGoalAction": None,
+                "reviewStatusAction": set_review_status,
+                "splitTransactionsAction": None,
+                "actionSetBusinessEntity": None,
+                "actionSetBusinessEntityIsUnassigned": False,
+                "setHideFromReportsAction": set_hide_from_reports if set_hide_from_reports is not None else existing.get("setHideFromReportsAction", False),
+                "applyToExistingTransactions": apply_to_existing,
+            }
+
+            if amount_min is not None or amount_max is not None:
+                if amount_min is not None and amount_max is not None:
+                    input_data["amountCriteria"] = {
+                        "operator": "between", "isExpense": is_expense,
+                        "value": None, "valueRange": {"lower": amount_min, "upper": amount_max},
+                    }
+                elif amount_min is not None:
+                    input_data["amountCriteria"] = {
+                        "operator": "gt", "isExpense": is_expense,
+                        "value": amount_min, "valueRange": None,
+                    }
+                else:
+                    input_data["amountCriteria"] = {
+                        "operator": "lt", "isExpense": is_expense,
+                        "value": amount_max, "valueRange": None,
+                    }
+
+            return await client.gql_call(
+                operation="Common_UpdateTransactionRuleMutationV2",
+                graphql_query=mutation,
+                variables={"input": input_data},
+            )
+
+        result = run_async(_update_rule())
+        errors = result.get("updateTransactionRuleV2", {}).get("errors")
+        if errors:
+            return f"Error updating rule: {errors}"
+        return f"Rule {rule_id} updated successfully"
+    except Exception as e:
+        logger.error(f"Failed to update transaction rule: {e}")
+        return f"Error updating transaction rule: {str(e)}"
+
+
+@mcp.tool()
+def search_merchants(query: str, limit: int = 20) -> str:
+    """
+    Search for merchants by name. Returns matching merchants with their IDs and transaction counts.
+    Useful for finding duplicate or variant merchants before merging.
+
+    Args:
+        query: Search string to match against merchant names
+        limit: Max results to return (default 20)
+    """
+    try:
+        async def _search():
+            client = await get_monarch_client()
+            from gql import gql as gql_parse
+
+            gql_query = gql_parse("""
+                query Web_GetMerchantSettingsPage($offset: Int, $orderBy: MerchantOrdering, $search: String) {
+                    merchants(offset: $offset, orderBy: $orderBy, search: $search) {
+                        id
+                        name
+                        transactionCount
+                        createdAt
+                        logoUrl
+                        __typename
+                    }
+                    merchantCount
+                }
+            """)
+            return await client.gql_call(
+                operation="Web_GetMerchantSettingsPage",
+                graphql_query=gql_query,
+                variables={"search": query, "orderBy": "TRANSACTION_COUNT", "offset": 0},
+            )
+
+        result = run_async(_search())
+        merchants = result.get("merchants", [])[:limit]
+        return json.dumps(merchants, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to search merchants: {e}")
+        return f"Error searching merchants: {str(e)}"
+
+
+@mcp.tool()
+def update_merchant(
+    merchant_id: str,
+    name: str,
+) -> str:
+    """
+    Rename a Monarch Money merchant. This renames the merchant globally —
+    all transactions from this merchant will show the new name.
+
+    Use get_transactions or get_transaction_details to find the merchant ID.
+
+    Args:
+        merchant_id: The Monarch merchant ID (from transaction merchant.id)
+        name: New display name for the merchant
+    """
+    try:
+        async def _update_merchant():
+            client = await get_monarch_client()
+            from gql import gql as gql_parse
+
+            query = gql_parse("""
+                mutation Common_UpdateMerchant($input: UpdateMerchantInput!) {
+                    updateMerchant(input: $input) {
+                        merchant {
+                            id
+                            name
+                            __typename
+                        }
+                        errors {
+                            fieldErrors { field messages __typename }
+                            message
+                            code
+                            __typename
+                        }
+                        __typename
+                    }
+                }
+            """)
+            return await client.gql_call(
+                operation="Common_UpdateMerchant",
+                graphql_query=query,
+                variables={
+                    "input": {
+                        "merchantId": merchant_id,
+                        "name": name,
+                        "recurrence": {"isRecurring": False, "amount": 0, "isActive": True},
+                    }
+                },
+            )
+
+        result = run_async(_update_merchant())
+        errors = result.get("updateMerchant", {}).get("errors")
+        if errors:
+            return f"Error updating merchant: {errors}"
+        new_name = result.get("updateMerchant", {}).get("merchant", {}).get("name")
+        return f"Merchant renamed to '{new_name}'"
+    except Exception as e:
+        logger.error(f"Failed to update merchant: {e}")
+        return f"Error updating merchant: {str(e)}"
+
+
+@mcp.tool()
+def merge_merchants(
+    source_merchant_id: str,
+    target_merchant_id: str,
+) -> str:
+    """
+    Merge one merchant into another, moving all transactions to the target merchant,
+    then deleting the source merchant.
+
+    Use this to consolidate duplicate merchants (e.g. "Starbucks Coffee"
+    into "Starbucks").
+
+    Args:
+        source_merchant_id: The merchant ID to delete (transactions will be moved away from this)
+        target_merchant_id: The merchant ID to merge into (transactions will be moved here)
+    """
+    try:
+        async def _merge():
+            client = await get_monarch_client()
+            from gql import gql as gql_parse
+
+            query = gql_parse("""
+                mutation Common_DeleteMerchant($merchantId: ID!, $moveToId: ID) {
+                    deleteMerchant(id: $merchantId, moveRelationsToMerchantId: $moveToId) {
+                        success
+                        __typename
+                    }
+                }
+            """)
+            return await client.gql_call(
+                operation="Common_DeleteMerchant",
+                graphql_query=query,
+                variables={
+                    "merchantId": source_merchant_id,
+                    "moveToId": target_merchant_id,
+                },
+            )
+
+        result = run_async(_merge())
+        success = result.get("deleteMerchant", {}).get("success")
+        assert success, f"Merge failed: {result}"
+        return f"Merged merchant {source_merchant_id} into {target_merchant_id} successfully"
+    except Exception as e:
+        logger.error(f"Failed to merge merchants: {e}")
+        return f"Error merging merchants: {str(e)}"
 
 
 @mcp.tool()
@@ -814,6 +1609,101 @@ def create_transaction_tag(
     except Exception as e:
         logger.error(f"Failed to create transaction tag: {e}")
         return f"Error creating transaction tag: {str(e)}"
+
+
+@mcp.tool()
+def update_transaction_tag(
+    tag_id: str,
+    name: str,
+    color: str,
+) -> str:
+    """
+    Update an existing transaction tag's name or color.
+
+    Args:
+        tag_id: The tag ID to update (from get_transaction_tags)
+        name: New tag name
+        color: New hex color code (e.g. "#FF5733")
+    """
+    try:
+        async def _update_tag():
+            client = await get_monarch_client()
+            from gql import gql as gql_parse
+
+            mutation = gql_parse("""
+                mutation Common_UpdateTransactionTag($input: UpdateTransactionTagInput!) {
+                    updateTransactionTag(input: $input) {
+                        tag {
+                            id
+                            name
+                            color
+                            order
+                            __typename
+                        }
+                        errors {
+                            message
+                            __typename
+                        }
+                        __typename
+                    }
+                }
+            """)
+            return await client.gql_call(
+                operation="Common_UpdateTransactionTag",
+                graphql_query=mutation,
+                variables={"input": {"id": tag_id, "name": name, "color": color}},
+            )
+
+        result = run_async(_update_tag())
+        errors = result.get("updateTransactionTag", {}).get("errors")
+        if errors:
+            return f"Error updating tag: {errors}"
+        tag = result.get("updateTransactionTag", {}).get("tag", {})
+        return f"Tag updated: {tag.get('name')} ({tag.get('color')})"
+    except Exception as e:
+        logger.error(f"Failed to update transaction tag: {e}")
+        return f"Error updating transaction tag: {str(e)}"
+
+
+@mcp.tool()
+def delete_transaction_tag(tag_id: str) -> str:
+    """
+    Delete a transaction tag by ID. This removes the tag from all transactions.
+
+    Args:
+        tag_id: The tag ID to delete (from get_transaction_tags)
+    """
+    try:
+        async def _delete_tag():
+            client = await get_monarch_client()
+            from gql import gql as gql_parse
+
+            mutation = gql_parse("""
+                mutation Common_DeleteTransactionTag($id: ID!) {
+                    deleteTransactionTag(id: $id) {
+                        deleted
+                        errors {
+                            message
+                            __typename
+                        }
+                        __typename
+                    }
+                }
+            """)
+            return await client.gql_call(
+                operation="Common_DeleteTransactionTag",
+                graphql_query=mutation,
+                variables={"id": tag_id},
+            )
+
+        result = run_async(_delete_tag())
+        errors = result.get("deleteTransactionTag", {}).get("errors")
+        if errors:
+            return f"Error deleting tag: {errors}"
+        return f"Tag {tag_id} deleted successfully"
+    except Exception as e:
+        logger.error(f"Failed to delete transaction tag: {e}")
+        return f"Error deleting transaction tag: {str(e)}"
 
 
 @mcp.tool()
@@ -871,14 +1761,14 @@ def set_budget_amount(
         async def _set_budget_amount():
             client = await get_monarch_client()
             kwargs = {
-                "amount": amount,
+                "category_id": category_id,
             }
             if month:
                 # Convert YYYY-MM to start_date format expected by API
                 kwargs["start_date"] = f"{month}-01"
             if apply_to_future is not None:
                 kwargs["apply_to_future"] = apply_to_future
-            return await client.set_budget_amount(category_id, **kwargs)
+            return await client.set_budget_amount(amount, **kwargs)
 
         result = run_async(_set_budget_amount())
 
@@ -950,10 +1840,10 @@ def create_manual_account(
                 "account_name": name,
                 "account_type": account_type,
                 "account_balance": balance,
-                "include_in_net_worth": include_in_net_worth,
+                # monarchmoney lib expects is_in_net_worth / account_sub_type (required)
+                "is_in_net_worth": include_in_net_worth,
+                "account_sub_type": account_subtype,
             }
-            if account_subtype:
-                kwargs["account_subtype"] = account_subtype
             return await client.create_manual_account(**kwargs)
 
         result = run_async(_create_manual_account())
